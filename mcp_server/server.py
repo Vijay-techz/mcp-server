@@ -175,11 +175,17 @@ def find_pods_with_python(namespace: str = "default") -> str:
 
 
 if __name__ == "__main__":
-    logger.info("Starting MCP tool runtime")
+    import asyncio
+    import inspect
+    import time
+    import signal
+
+    logger.info("Starting MCP tool runtime (compat-run wrapper)")
 
     # Enable faulthandler to dump tracebacks for low-level crashes
     try:
         import faulthandler
+
         faulthandler.enable(file=sys.stdout)
         logger.debug("faulthandler enabled")
     except Exception:
@@ -189,6 +195,7 @@ if __name__ == "__main__":
     def _excepthook(exc_type, exc_value, exc_tb):
         logger.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
         import traceback as _tb
+
         _tb.print_exception(exc_type, exc_value, exc_tb)
         # exit with non-zero so Kubernetes sees the failure
         try:
@@ -198,14 +205,65 @@ if __name__ == "__main__":
 
     sys.excepthook = _excepthook
 
+    # Signal handler to log term/interrupt and dump tracebacks
+    def _on_signal(signum, frame):
+        logger.info("Received signal %s, shutting down", signum)
+        try:
+            import faulthandler as _fh
+
+            _fh.dump_traceback(file=sys.stdout)
+        except Exception:
+            logger.debug("faulthandler.dump_traceback failed")
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
+    # Introspect mcp object to help diagnose API differences
     try:
-        logger.debug("Calling mcp.run()")
-        mcp.run()
-        logger.debug("mcp.run() returned")
+        logger.debug("mcp type: %s", type(mcp).__name__)
+        public_attrs = [n for n in dir(mcp) if not n.startswith("_")]
+        logger.debug("mcp public attributes: %s", public_attrs)
     except Exception:
-        logger.exception("Exception raised during mcp.run()")
-        # re-raise to ensure container fails visibly
-        raise
-    except BaseException:
-        logger.exception("BaseException raised during mcp.run()")
+        logger.debug("Failed to introspect mcp object")
+
+    run_callable = getattr(mcp, "run", None)
+    if run_callable is None or not callable(run_callable):
+        logger.error("mcp has no callable run() method (found: %r); cannot start server", run_callable)
+        # keep container alive for inspection
+        while True:
+            time.sleep(60)
+
+    try:
+        # If run is an async function
+        if asyncio.iscoroutinefunction(run_callable):
+            logger.debug("mcp.run is a coroutine function; calling asyncio.run(mcp.run())")
+            asyncio.run(run_callable())
+        else:
+            logger.debug("Calling mcp.run() (synchronous call)")
+            result = run_callable()
+            logger.debug("mcp.run() returned: %r", result)
+
+            # If it returned an awaitable, run it
+            if inspect.isawaitable(result):
+                logger.debug("mcp.run() returned awaitable; running it with asyncio.run()")
+                asyncio.run(result)
+            # server-like object with blocking method?
+            elif hasattr(result, "serve_forever") and callable(result.serve_forever):
+                logger.debug("mcp.run() returned object with serve_forever(); calling it")
+                result.serve_forever()
+            elif hasattr(result, "run_forever") and callable(result.run_forever):
+                logger.debug("mcp.run() returned object with run_forever(); calling it")
+                result.run_forever()
+            else:
+                # If result is None (common when run() registers services and returns), keep process alive
+                logger.warning(
+                    "mcp.run() returned without blocking (type=%s). Entering sleep loop to keep the process running for inspection.",
+                    type(result).__name__,
+                )
+                while True:
+                    time.sleep(60)
+
+    except Exception:
+        logger.exception("Exception while starting MCP server")
         raise
