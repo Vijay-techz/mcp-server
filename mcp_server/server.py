@@ -176,4 +176,36 @@ def find_pods_with_python(namespace: str = "default") -> str:
 
 if __name__ == "__main__":
     logger.info("Starting MCP tool runtime")
-    mcp.run()
+
+    # Enable faulthandler to dump tracebacks for low-level crashes
+    try:
+        import faulthandler
+        faulthandler.enable(file=sys.stdout)
+        logger.debug("faulthandler enabled")
+    except Exception:
+        logger.debug("faulthandler not available")
+
+    # Install a global excepthook that logs uncaught exceptions and prints traceback
+    def _excepthook(exc_type, exc_value, exc_tb):
+        logger.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+        import traceback as _tb
+        _tb.print_exception(exc_type, exc_value, exc_tb)
+        # exit with non-zero so Kubernetes sees the failure
+        try:
+            sys.exit(1)
+        except SystemExit:
+            pass
+
+    sys.excepthook = _excepthook
+
+    try:
+        logger.debug("Calling mcp.run()")
+        mcp.run()
+        logger.debug("mcp.run() returned")
+    except Exception:
+        logger.exception("Exception raised during mcp.run()")
+        # re-raise to ensure container fails visibly
+        raise
+    except BaseException:
+        logger.exception("BaseException raised during mcp.run()")
+        raise
