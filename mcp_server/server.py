@@ -1,6 +1,29 @@
 import json
 import os
+import sys
+import logging
 from typing import Any, Optional
+
+# Configure logging from environment variable LOGGING
+# Accepted values (case-insensitive): DEBUG, INFO, WARN, WARNING, ERROR
+log_level_name = (os.getenv("LOGGING") or "INFO").strip().upper()
+if log_level_name == "WARN":
+    log_level_name = "WARNING"
+_log_level = getattr(logging, log_level_name, None)
+if not isinstance(_log_level, int):
+    _log_level = logging.INFO
+
+logging.basicConfig(
+    level=_log_level,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+# Apply level to common libraries used by this app to make their logs respect LOGGING
+for _logger in ("kubernetes", "mcp", "urllib3", "requests"):
+    logging.getLogger(_logger).setLevel(_log_level)
+
+logger = logging.getLogger(__name__)
+logger.debug("Logging initialized at level %s", logging.getLevelName(_log_level))
 
 from kubernetes import client, config
 
@@ -12,6 +35,7 @@ except ModuleNotFoundError:
     from mcp.server.mcpserver import MCPServer as FastMCP
 
 mcp = FastMCP("kubernetes-tools")
+logger.info("MCP server wrapper initialized using %s", type(mcp).__name__)
 
 
 def _read_file_if_exists(path: Optional[str]) -> Optional[str]:
@@ -36,6 +60,7 @@ def _get_k8s_api_client() -> client.ApiClient:
     )
 
     if api_server and token:
+        logger.debug("Creating ApiClient using explicit API server %s", api_server)
         configuration = client.Configuration()
         configuration.host = api_server.rstrip("/")
         configuration.api_key_prefix["authorization"] = "Bearer"
@@ -48,9 +73,11 @@ def _get_k8s_api_client() -> client.ApiClient:
         return client.ApiClient(configuration=configuration)
 
     try:
+        logger.debug("Attempting in-cluster Kubernetes configuration")
         config.load_incluster_config()
         return client.ApiClient()
     except config.ConfigException:
+        logger.debug("Falling back to kubeconfig file")
         config.load_kube_config()
         return client.ApiClient()
 
@@ -148,4 +175,5 @@ def find_pods_with_python(namespace: str = "default") -> str:
 
 
 if __name__ == "__main__":
+    logger.info("Starting MCP tool runtime")
     mcp.run()
