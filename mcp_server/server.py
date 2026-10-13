@@ -174,7 +174,13 @@ def find_pods_with_python(namespace: str = "default") -> str:
     }, indent=2)
 
 
-if __name__ == "__main__":
+def main():
+    """Start the MCP server runtime with compatibility wrappers that keep the
+    process alive when run() returns immediately. This extracts the previous
+    if __name__ == '__main__' logic into a callable function so other entry
+    points (for example, python -m mcp_server) can use the same startup
+    behavior and avoid exiting immediately.
+    """
     import asyncio
     import inspect
     import time
@@ -267,3 +273,7 @@ if __name__ == "__main__":
     except Exception:
         logger.exception("Exception while starting MCP server")
         raise
+
+
+if __name__ == "__main__":
+    main()
